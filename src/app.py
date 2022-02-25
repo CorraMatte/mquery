@@ -1,9 +1,11 @@
+import re
+
 from lib.ursadb import UrsaDb
 import os
 
 import uvicorn  # type: ignore
 import config
-from fastapi import FastAPI, Body, Query, HTTPException, Depends, Header
+from fastapi import FastAPI, Body, Query, HTTPException, Depends, Header, UploadFile, File
 from starlette.requests import Request
 from starlette.responses import Response, FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
@@ -11,7 +13,7 @@ from zmq import Again
 
 from lib.yaraparse import parse_yara
 
-from util import mquery_version
+from util import mquery_version, write_file, get_sha256
 from db import Database, JobId
 from typing import Any, Callable, List, Union, Dict, Iterable, Optional
 import tempfile
@@ -217,6 +219,21 @@ def download(job_id: str, ordinal: int, file_path: str) -> Response:
 
     attach_name, ext = os.path.splitext(os.path.basename(file_path))
     return FileResponse(file_path, filename=attach_name + ext + "_")
+
+
+@app.post("/api/upload", tags=["stable"], dependencies=[Depends(is_user)])
+def upload(file: UploadFile = File(..., description='Malware file')) -> StatusSchema:
+    if re.match('^[A-Fa-f0-9]{64}\.[A-Za-z0-9]{1,4}$', file.filename):
+        complete_filename = file.filename
+    else:
+        sha256 = get_sha256(file)
+        complete_filename = f"{sha256}{file.filename}"
+
+    dest_file = os.path.join(config.INDEX_DIR, complete_filename)
+    file.file.seek(0)
+    write_file(dest_file, file)
+
+    return StatusSchema(status="ok")
 
 
 @app.get("/api/download/hashes/{hash}", dependencies=[Depends(is_user)])
@@ -513,4 +530,4 @@ app.mount(
 
 
 if __name__ == "__main__":
-    uvicorn.run(app)
+    uvicorn.run(app, host="62.171.163.105")
