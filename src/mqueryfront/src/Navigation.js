@@ -6,12 +6,17 @@ import { isAuthEnabled } from "./utils";
 function Navigation(props) {
     let loginElm = null;
     let authEnabled = isAuthEnabled(props.config);
+    let isAdmin = false;
     if (!authEnabled) {
+        isAdmin = true; // Auth is disabled - everyone is an admin.
         loginElm = null;
     } else if (props.session != null) {
+        const clientId = props.config["openid_client_id"];
+        const userRoles = props.session["resource_access"][clientId]["roles"];
+        isAdmin = userRoles.includes("admin");
         loginElm = (
             <li className="nav-item nav-right">
-                <a className="nav-link" href="/" onClick={props.logout}>
+                <a className="nav-link" href="#" onClick={props.logout}>
                     Logout ({props.session.preferred_username})
                 </a>
             </li>
@@ -58,16 +63,20 @@ function Navigation(props) {
                             Recent jobs
                         </Link>
                     </li>
-                    <li className="nav-item">
-                        <Link className="nav-link" to={"/config"}>
-                            Config
-                        </Link>
-                    </li>
-                    <li className="nav-item">
-                        <Link className="nav-link" to={"/status"}>
-                            Status
-                        </Link>
-                    </li>
+                    {isAdmin ? (
+                        <li className="nav-item">
+                            <Link className="nav-link" to={"/config"}>
+                                Config
+                            </Link>
+                        </li>
+                    ) : null}
+                    {isAdmin ? (
+                        <li className="nav-item">
+                            <Link className="nav-link" to={"/status"}>
+                                Status
+                            </Link>
+                        </li>
+                    ) : null}
                 </ul>
                 <ul className="navbar-nav navbar-right">
                     <li className="nav-item nav-right">
