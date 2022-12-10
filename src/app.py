@@ -237,6 +237,24 @@ def upload(file: UploadFile = File(..., description='Malware file')) -> StatusSc
     return StatusSchema(status="ok")
 
 
+@app.get("/api/download/{sha256}", tags=["stable"], dependencies=[Depends(is_user)])
+def download_by_sha256(sha256: str) -> Response:
+    if not re.match('^[a-fA-F0-9]{64}$', sha256):
+        raise HTTPException(
+            status_code=429, detail='You did not insert a sha256',
+        )
+
+    files = sorted(os.listdir(config.INDEX_DIR))
+    file_name = next((s for s in files if sha256 in s), None)
+
+    if file_name is None:
+        raise HTTPException(
+            status_code=404, detail='File not found',
+        )
+
+    return FileResponse(os.path.join(config.INDEX_DIR, file_name), filename=sha256)
+
+
 @app.get("/api/download/hashes/{hash}", dependencies=[Depends(is_user)])
 def download_hashes(hash: str) -> Response:
     hashes = "\n".join(
