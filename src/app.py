@@ -241,7 +241,7 @@ def upload(file: UploadFile = File(..., description='Malware file')) -> StatusSc
 def download_by_sha256(sha256: str) -> Response:
     if not re.match('^[a-fA-F0-9]{64}$', sha256):
         raise HTTPException(
-            status_code=429, detail='You did not insert a sha256',
+            status_code=400, detail='You did not insert a valid sha256'
         )
 
     files = sorted(os.listdir(config.INDEX_DIR))
@@ -249,7 +249,7 @@ def download_by_sha256(sha256: str) -> Response:
 
     if file_name is None:
         raise HTTPException(
-            status_code=404, detail='File not found',
+            status_code=404, detail='File not found'
         )
 
     return FileResponse(os.path.join(config.INDEX_DIR, file_name), filename=sha256)
