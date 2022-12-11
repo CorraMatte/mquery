@@ -245,14 +245,17 @@ def download_by_sha256(sha256: str) -> Response:
         )
 
     files = sorted(os.listdir(config.INDEX_DIR))
-    file_name = next((s for s in files if sha256 in s), None)
+    files_dict = {}
 
-    if file_name is None:
+    for f in files:
+        files_dict[f[:64]] = f
+
+    if sha256 not in files_dict:
         raise HTTPException(
             status_code=404, detail='File not found'
         )
 
-    return FileResponse(os.path.join(config.INDEX_DIR, file_name), filename=sha256)
+    return FileResponse(os.path.join(config.INDEX_DIR, files_dict[sha256]), filename=sha256)
 
 
 @app.get("/api/download/hashes/{hash}", dependencies=[Depends(is_user)])
