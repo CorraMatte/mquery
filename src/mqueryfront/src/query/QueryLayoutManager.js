@@ -27,19 +27,14 @@ const QueryLayoutManager = (props) => {
         onYaraUpdate,
         parsedError,
         selectedTaints,
+        forceSlowQueries,
     } = props;
-
-    const queryParse = queryError ? (
-        <ErrorPage error={queryError} />
-    ) : queryPlan ? (
-        <QueryParseStatus queryPlan={queryPlan} />
-    ) : null;
 
     const queryResults = job ? (
         <div>
             <button
                 type="button"
-                className="btn btn-primary btn-sm pull-left mr-4"
+                className="btn btn-primary btn-sm pull-left me-4"
                 onClick={onCollapsePane}
             >
                 <FontAwesomeIcon icon={faAlignLeft} />
@@ -57,10 +52,16 @@ const QueryLayoutManager = (props) => {
         <LoadingPage />
     );
 
-    const queryResultOrParse = qhash ? queryResults : queryParse;
+    const resultsTab = queryError ? (
+        <ErrorPage error={queryError} />
+    ) : queryPlan ? (
+        <QueryParseStatus queryPlan={queryPlan} />
+    ) : qhash ? (
+        queryResults
+    ) : null;
 
     const queryFieldPane = isCollapsed ? null : (
-        <div className={queryResultOrParse ? "col-md-6" : "col-md-12"}>
+        <div className={resultsTab ? "col-md-6" : "col-md-12"}>
             <QueryField
                 readOnly={!!qhash}
                 onSubmitQuery={onSubmitQuery}
@@ -72,6 +73,7 @@ const QueryLayoutManager = (props) => {
                 onYaraUpdate={onYaraUpdate}
                 parsedError={parsedError}
                 selectedTaints={selectedTaints}
+                forceSlowQueries={forceSlowQueries}
             />
         </div>
     );
@@ -87,7 +89,7 @@ const QueryLayoutManager = (props) => {
                             : "col-md-6 order-first order-md-last"
                     }
                 >
-                    {queryResultOrParse}
+                    {resultsTab}
                 </div>
             </div>
         </div>

@@ -4,8 +4,20 @@ from lib.ursadb import UrsaDb
 import os
 
 import uvicorn  # type: ignore
-import config
-from fastapi import FastAPI, Body, Query, HTTPException, Depends, Header, UploadFile, File
+from config import app_config
+from fastapi import (
+    FastAPI,
+    Body,
+    Query,
+    HTTPException,
+    Depends,
+    Header,
+    UploadFile,
+    File,
+)  # type: ignore
+from starlette.requests import Request  # type: ignore
+from starlette.responses import Response, FileResponse, StreamingResponse  # type: ignore
+from starlette.staticfiles import StaticFiles  # type: ignore
 from starlette.requests import Request
 from starlette.responses import Response, FileResponse, StreamingResponse
 from starlette.staticfiles import StaticFiles
@@ -14,13 +26,14 @@ from zmq import Again
 from lib.yaraparse import parse_yara
 
 from util import mquery_version, write_file, get_sha256
-from db import Database, JobId
+from db import Database
 from typing import Any, Callable, List, Union, Dict, Iterable, Optional
 import tempfile
 import zipfile
 import jwt
 import base64
 from cryptography.hazmat.primitives import serialization
+from plugins import PluginManager
 
 from schema import (
     JobsSchema,
@@ -40,8 +53,18 @@ from schema import (
 )
 
 
-db = Database(config.REDIS_HOST, config.REDIS_PORT)
+db = Database(app_config.redis.host, app_config.redis.port)
 app = FastAPI()
+
+
+def with_plugins() -> Iterable[PluginManager]:
+    """Cleans up plugins after processing."""
+
+    plugins = PluginManager(app_config.mquery.plugins, db)
+    try:
+        yield plugins
+    finally:
+        plugins.cleanup()
 
 
 class User:
@@ -68,26 +91,38 @@ class User:
 
 
 async def current_user(authorization: Optional[str] = Header(None)) -> User:
+    auth_enabled = db.get_mquery_config_key("auth_enabled")
+    if not auth_enabled or auth_enabled == "false":
+        return User(None)
+
     if not authorization:
         return User(None)
 
-    bearer, token = authorization.split()
-    if bearer != "Bearer":
-        return User(None)
+    # 401 error object, that will force the user to re-authenticate.
+    unauthorized = HTTPException(
+        status_code=401,
+        detail="Invalid token, please re-authenticate.",
+    )
+
+    # Be nice for the user, even when they send us an invalid header.
+    token_parts = authorization.split()
+    if len(token_parts) != 2 or token_parts[0] != "Bearer":
+        raise unauthorized
+
+    _bearer, token = token_parts
 
     secret = db.get_mquery_config_key("openid_secret")
     if secret is None:
-        return User(None)
+        raise RuntimeError("Invalid configuration - missing_openid_secret.")
 
-    public_key = serialization.load_der_public_key(base64.b64decode(secret))
+    public_key = serialization.load_der_public_key(base64.b64decode(secret))  # type: ignore
     try:
         token_json = jwt.decode(
             token, public_key, algorithms=["RS256"], audience="account"  # type: ignore
         )
-    except jwt.ExpiredSignatureError:
-        # The signature has expired. Maybe we should raise 401 here, but on the
-        # other hand we don't want to raise 401 if auth_enabled is not enabled.
-        return User(None)
+    except jwt.InvalidTokenError:
+        # Invalid token means invalid signature, issuer, or just expired.
+        raise unauthorized
 
     return User(token_json)
 
@@ -107,40 +142,71 @@ async def add_headers(request: Request, call_next: Callable) -> Response:
 
 
 class RoleChecker:
-    def __init__(self, allowed_roles: List[str]) -> None:
-        self.allowed_roles = allowed_roles
+    def __init__(self, need_permissions: List[str]) -> None:
+        self.need_permissions = need_permissions
 
     def __call__(self, user: User = Depends(current_user)):
         auth_enabled = db.get_mquery_config_key("auth_enabled")
         if not auth_enabled or auth_enabled == "false":
             return
 
-        client_id = db.get_mquery_config_key("openid_client_id")
-        user_roles = user.roles(client_id)
-        auth_default_roles = db.get_mquery_config_key("auth_default_roles")
-        if auth_default_roles is None:
-            default_roles = []
-        else:
-            default_roles = [
-                role.strip() for role in auth_default_roles.split(",")
-            ]
-        all_user_roles = list(set(user_roles + default_roles))
+        all_roles = get_user_roles(user)
 
-        if not any(role in self.allowed_roles for role in all_user_roles):
+        if not any(role in self.need_permissions for role in all_roles):
             message = (
                 f"Operation not allowed for user {user.name} "
-                f"(user roles: {user_roles}) "
-                f"(default roles: {default_roles}) "
-                f"(required roles: any of {self.allowed_roles})"
+                f"(user effective roles: {all_roles}) "
+                f"(required roles: any of {self.need_permissions})"
             )
             error_code = 401 if user.is_anonymous else 403
             raise HTTPException(
-                status_code=error_code, detail=message,
+                status_code=error_code,
+                detail=message,
             )
 
 
+# See docs/users.md for documentation on the permission model.
 is_admin = RoleChecker(["admin"])
 is_user = RoleChecker(["user"])
+can_view_queries = RoleChecker(["can_view_queries"])
+can_manage_queries = RoleChecker(["can_manage_queries"])
+can_list_queries = RoleChecker(["can_list_queries"])
+can_download_files = RoleChecker(["can_download_files"])
+
+
+def get_user_roles(user: User) -> List[str]:
+    client_id = db.get_mquery_config_key("openid_client_id")
+    user_roles = user.roles(client_id)
+    auth_default_roles = db.get_mquery_config_key("auth_default_roles")
+    if not auth_default_roles:
+        auth_default_roles = "admin"
+    default_roles = [role.strip() for role in auth_default_roles.split(",")]
+    all_roles = set(user_roles + default_roles)
+    return sum((expand_role(role) for role in all_roles), [])
+
+
+def expand_role(role: str) -> List[str]:
+    """Some roles imply other roles or permissions. For example, admin role
+    also gives permissions for all user permissions."""
+    role_implications = {
+        "admin": [
+            "user",
+            "can_list_all_queries",
+            "can_manage_all_queries",
+        ],
+        "user": [
+            "can_view_queries",
+            "can_manage_queries",
+            "can_list_queries",
+            "can_download_files",
+        ],
+        "can_manage_all_queries": ["can_manage_queries"],
+        "can_list_all_queries": ["can_list_queries"],
+    }
+    implied_roles = [role]
+    for subrole in role_implications.get(role, []):
+        implied_roles += expand_role(subrole)
+    return implied_roles
 
 
 # Admin-only routes (when user permissions are configured).
@@ -163,29 +229,6 @@ def config_list() -> List[ConfigSchema]:
 
 
 @app.post(
-    "/api/compact",
-    response_model=StatusSchema,
-    tags=["internal"],
-    dependencies=[Depends(is_admin)],
-)
-def compact_files() -> StatusSchema:
-    """
-    Broadcasts compact command to all ursadb instances. This uses `compact all;`
-    subcommand (which is more intuitive because it ways compacts), except the
-    recommended `compact smart;` which ignores useless merges. Because of this,
-    and also because of lack of control, this it's not recommended for advanced
-    users - see documentation and `compactall.py` script to learn more.
-
-    This still won't merge datasets of different types or with different tags,
-    and will silently do nothing in such cases.
-
-    This endpoint is not stable and may be subject to change in the future.
-    """
-    db.broadcast_command(f"compact all;")
-    return StatusSchema(status="ok")
-
-
-@app.post(
     "/api/config/edit",
     response_model=StatusSchema,
     tags=["internal"],
@@ -201,239 +244,6 @@ def config_edit(data: RequestConfigEdit = Body(...)) -> StatusSchema:
     return StatusSchema(status="ok")
 
 
-# Standard authenticated routes (when user permissions are configured).
-# Accessible for every logged in user (permission: "reader")
-
-
-@app.get("/api/download", tags=["stable"], dependencies=[Depends(is_user)])
-def download(job_id: str, ordinal: int, file_path: str) -> Response:
-    """
-    Sends a file from given `file_path`. This path should come from
-    results of one of the previous searches.
-
-    This endpoint needs `job_id` that found the specified file, and `ordinal`
-    (index of the file in that job), to ensure that user can't download
-    arbitrary files (for example "/etc/passwd").
-    """
-    if not db.job_contains(JobId(job_id), ordinal, file_path):
-        return Response("No such file in result set.", status_code=404)
-
-    attach_name, ext = os.path.splitext(os.path.basename(file_path))
-    return FileResponse(file_path, filename=attach_name + ext + "_")
-
-
-@app.post("/api/upload", tags=["stable"], dependencies=[Depends(is_user)])
-def upload(file: UploadFile = File(..., description='Malware file')) -> StatusSchema:
-    if re.match('^[A-Fa-f0-9]{64}\.[A-Za-z0-9]{1,4}$', file.filename):
-        complete_filename = file.filename
-    else:
-        sha256 = get_sha256(file)
-        complete_filename = f"{sha256}{file.filename}"
-
-    dest_file = os.path.join(config.INDEX_DIR, complete_filename)
-    file.file.seek(0)
-    write_file(dest_file, file)
-
-    return StatusSchema(status="ok")
-
-
-@app.get("/api/download/{sha256}", tags=["stable"], dependencies=[Depends(is_user)])
-def download_by_sha256(sha256: str) -> Response:
-    if not re.match('^[a-fA-F0-9]{64}$', sha256):
-        raise HTTPException(
-            status_code=400, detail='You did not insert a valid sha256'
-        )
-
-    files = sorted(os.listdir(config.INDEX_DIR))
-    files_dict = {}
-
-    for f in files:
-        files_dict[f[:64]] = f
-
-    if sha256 not in files_dict:
-        raise HTTPException(
-            status_code=404, detail='File not found'
-        )
-
-    return FileResponse(os.path.join(config.INDEX_DIR, files_dict[sha256]), filename=sha256)
-
-
-@app.get("/api/download/hashes/{hash}", dependencies=[Depends(is_user)])
-def download_hashes(hash: str) -> Response:
-    hashes = "\n".join(
-        d["meta"]["sha256"]["display_text"]
-        for d in db.get_job_matches(JobId(hash)).matches
-    )
-    return Response(hashes + "\n")
-
-
-def zip_files(matches: List[Dict[Any, Any]]) -> Iterable[bytes]:
-    with tempfile.NamedTemporaryFile() as writer:
-        with open(writer.name, "rb") as reader:
-            with zipfile.ZipFile(writer, mode="w") as zipwriter:
-                for match in matches:
-                    sha256 = match["meta"]["sha256"]["display_text"]
-                    zipwriter.write(match["file"], sha256)
-                    yield reader.read()
-            writer.flush()
-            yield reader.read()
-
-
-@app.get("/api/download/files/{hash}", dependencies=[Depends(is_user)])
-async def download_files(hash: str) -> StreamingResponse:
-    matches = db.get_job_matches(JobId(hash)).matches
-    return StreamingResponse(zip_files(matches))
-
-
-@app.post(
-    "/api/query",
-    response_model=Union[QueryResponseSchema, List[ParseResponseSchema]],
-    tags=["stable"],
-    dependencies=[Depends(is_user)],
-)
-def query(
-    data: QueryRequestSchema = Body(...),
-) -> Union[QueryResponseSchema, List[ParseResponseSchema]]:
-    """
-    Starts a new search. Response will contain a new job ID that can be used
-    to check the job status and download matched files.
-    """
-    try:
-        rules = parse_yara(data.raw_yara)
-    except Exception as e:
-        raise HTTPException(
-            status_code=400, detail=f"Yara rule parsing failed: {e}"
-        )
-
-    if not rules:
-        raise HTTPException(status_code=400, detail=f"No rule was specified.")
-
-    if data.method == RequestQueryMethod.parse:
-        return [
-            ParseResponseSchema(
-                rule_name=rule.name,
-                rule_author=rule.author,
-                is_global=rule.is_global,
-                is_private=rule.is_private,
-                parsed=rule.parse().query,
-            )
-            for rule in rules
-        ]
-
-    active_agents = db.get_active_agents()
-
-    for agent, agent_spec in active_agents.items():
-        missing = set(data.required_plugins).difference(
-            agent_spec.active_plugins
-        )
-        if missing:
-            raise HTTPException(
-                status_code=409,
-                detail=f"Agent {agent} doesn't support "
-                f"required plugins: {', '.join(missing)}",
-            )
-
-    if not data.taints:
-        data.taints = []
-
-    job = db.create_search_task(
-        rules[-1].name,
-        rules[-1].author,
-        data.raw_yara,
-        data.priority,
-        data.files_limit or 0,
-        data.reference or "",
-        data.taints,
-        list(active_agents.keys()),
-    )
-    return QueryResponseSchema(query_hash=job.hash)
-
-
-@app.get(
-    "/api/matches/{hash}",
-    response_model=MatchesSchema,
-    tags=["stable"],
-    dependencies=[Depends(is_user)],
-)
-def matches(
-    hash: str, offset: int = Query(...), limit: int = Query(...)
-) -> MatchesSchema:
-    """
-    Returns a list of matched files, along with metadata tags and other
-    useful information. Results from this query can be used to download files
-    using the `/download` endpoint.
-    """
-    return db.get_job_matches(JobId(hash), offset, limit)
-
-
-@app.get(
-    "/api/job/{job_id}",
-    response_model=JobSchema,
-    tags=["stable"],
-    dependencies=[Depends(is_user)],
-)
-def job_info(job_id: str) -> JobSchema:
-    """
-    Returns a metadata for a single job. May be useful for monitoring
-    a job progress.
-    """
-    return db.get_job(JobId(job_id))
-
-
-@app.delete(
-    "/api/job/{job_id}",
-    response_model=StatusSchema,
-    tags=["stable"],
-    dependencies=[Depends(is_user)],
-)
-def job_cancel(job_id: str) -> StatusSchema:
-    """
-    Cancels the job with a provided `job_id`.
-    """
-    db.cancel_job(JobId(job_id))
-    return StatusSchema(status="ok")
-
-
-@app.get(
-    "/api/job",
-    response_model=JobsSchema,
-    tags=["stable"],
-    dependencies=[Depends(is_user)],
-)
-def job_statuses() -> JobsSchema:
-    """
-    Returns statuses of all the jobs in the system. May take some time (> 1s)
-    when there are a lot of them.
-    """
-    jobs = [db.get_job(job) for job in db.get_job_ids()]
-    jobs = sorted(jobs, key=lambda j: j.submitted, reverse=True)
-    jobs = [j for j in jobs if j.status != "removed"]
-    return JobsSchema(jobs=jobs)
-
-
-@app.post(
-    "/api/index",
-    response_model=StatusSchema,
-    tags=["internal"],
-    dependencies=[Depends(is_user)],
-)
-def reindex_files() -> StatusSchema:
-    """
-    Reindex files in the configured default directory.
-
-    There are no server-side checks to avoid indexing multiple times at the
-    same time, care should be taken when using it from user scripts.
-    This is also not very efficient for large datasets - take a look at
-    the documentation for indexing and `index.py` script to learn more.
-
-    This endpoint is not stable and may be subject to change in the future.
-    """
-    if config.INDEX_DIR is not None:
-        types = "[gram3, text4, wide8, hash4]"
-        db.broadcast_command(f'index "{config.INDEX_DIR}" with {types};')
-    return StatusSchema(status="ok")
-
-
 @app.get(
     "/api/backend",
     response_model=BackendStatusSchema,
@@ -442,7 +252,7 @@ def reindex_files() -> StatusSchema:
 )
 def backend_status() -> BackendStatusSchema:
     """
-    Returns the current status of backend services, and returns it. Intended to
+    Gets the current status of backend services, and returns it. Intended to
     be used by the webpage.
 
     This endpoint is not stable and may be subject to change in the future.
@@ -469,14 +279,17 @@ def backend_status() -> BackendStatusSchema:
             )
             components[f"ursadb ({name})"] = "unknown"
 
-    return BackendStatusSchema(agents=agents, components=components,)
+    return BackendStatusSchema(
+        agents=agents,
+        components=components,
+    )
 
 
 @app.get(
     "/api/backend/datasets",
     response_model=BackendStatusDatasetsSchema,
     tags=["internal"],
-    dependencies=[Depends(is_user)],
+    dependencies=[Depends(can_view_queries)],
 )
 def backend_status_datasets() -> BackendStatusDatasetsSchema:
     """
@@ -499,13 +312,303 @@ def backend_status_datasets() -> BackendStatusDatasetsSchema:
     return BackendStatusDatasetsSchema(datasets=datasets)
 
 
+# Standard authenticated routes (when user permissions are configured).
+# Accessible for every logged in user (permission: "reader")
+
+
+@app.get(
+    "/api/download",
+    tags=["stable"],
+    dependencies=[Depends(can_download_files)],
+)
+def download(
+    job_id: str,
+    ordinal: int,
+    file_path: str,
+    plugins: PluginManager = Depends(with_plugins),
+) -> Response:
+    """
+    Sends a file from given `file_path`. This path should come from
+    results of one of the previous searches.
+
+    This endpoint needs `job_id` that found the specified file, and `ordinal`
+    (index of the file in that job), to ensure that user can't download
+    arbitrary files (for example "/etc/passwd").
+    """
+    if not db.job_contains(job_id, ordinal, file_path):
+        return Response("No such file in result set.", status_code=404)
+
+    attach_name, ext = os.path.splitext(os.path.basename(file_path))
+    final_path = plugins.filter(file_path)
+    if final_path is None:
+        raise RuntimeError(
+            "Unexpected: trying to download a file excluded by filters"
+        )
+
+    return FileResponse(
+        final_path,
+        filename=attach_name + ext + "_",
+    )
+
+
+@app.post("/api/upload", tags=["stable"], dependencies=[Depends(is_user)])
+def upload(file: UploadFile = File(..., description='Malware file')) -> StatusSchema:
+    if re.match('^[A-Fa-f0-9]{64}\.[A-Za-z0-9]{1,4}$', file.filename):
+        complete_filename = file.filename
+    else:
+        sha256 = get_sha256(file)
+        complete_filename = f"{sha256}{file.filename}"
+
+    dest_file = os.path.join(app_config.INDEX_DIR, complete_filename)
+    file.file.seek(0)
+    write_file(dest_file, file)
+
+    return StatusSchema(status="ok")
+
+
+@app.get("/api/download/{sha256}", tags=["stable"], dependencies=[Depends(is_user)])
+def download_by_sha256(sha256: str) -> Response:
+    if not re.match('^[a-fA-F0-9]{64}$', sha256):
+        raise HTTPException(
+            status_code=400, detail='You did not insert a valid sha256'
+        )
+
+    files = sorted(os.listdir(app_config.INDEX_DIR))
+    files_dict = {}
+
+    for f in files:
+        files_dict[f[:64]] = f
+
+    if sha256 not in files_dict:
+        raise HTTPException(
+            status_code=404, detail='File not found'
+        )
+
+    return FileResponse(os.path.join(app_config.INDEX_DIR, files_dict[sha256]), filename=sha256)
+
+
+@app.get(
+    "/api/download/hashes/{job_id}", dependencies=[Depends(can_view_queries)]
+)
+def download_hashes(job_id: str) -> Response:
+    """Returns a list of job matches as a sha256 strings joined with newlines"""
+    hashes = "\n".join(
+        d["meta"]["sha256"]["display_text"]
+        for d in db.get_job_matches(job_id).matches
+    )
+    return Response(hashes + "\n")
+
+
+def zip_files(
+    plugins: PluginManager, matches: List[Dict[str, Any]]
+) -> Iterable[bytes]:
+    """Adds all the samples to a zip archive (replacing original filename
+    with sha256) and returns it as a stream of bytes."""
+    plugins = PluginManager(app_config.mquery.plugins, db)
+
+    with tempfile.NamedTemporaryFile() as writer:
+        with open(writer.name, "rb") as reader:
+            with zipfile.ZipFile(writer, mode="w") as zipwriter:
+                for match in matches:
+                    sha256 = match["meta"]["sha256"]["display_text"]
+                    file_path = plugins.filter(match["file"])
+                    if file_path is None:
+                        raise RuntimeError("Zipped file excluded by filters")
+                    zipwriter.write(file_path, sha256)
+                    yield reader.read()
+            writer.flush()
+            yield reader.read()
+
+
+@app.get(
+    "/api/download/files/{job_id}",
+    dependencies=[Depends(is_user), Depends(can_download_files)],
+)
+async def download_files(
+    job_id: str, plugins: PluginManager = Depends(with_plugins)
+) -> StreamingResponse:
+    matches = db.get_job_matches(job_id).matches
+    return StreamingResponse(zip_files(plugins, matches))
+
+
+@app.post(
+    "/api/query",
+    response_model=Union[QueryResponseSchema, List[ParseResponseSchema]],  # type: ignore
+    tags=["stable"],
+    dependencies=[Depends(can_manage_queries)],
+)
+def query(
+    data: QueryRequestSchema = Body(...), user: User = Depends(current_user)
+) -> Union[QueryResponseSchema, List[ParseResponseSchema]]:
+    """
+    Starts a new search. Response will contain a new job ID that can be used
+    to check the job status and download matched files.
+    """
+    try:
+        rules = parse_yara(data.raw_yara)
+    except Exception as e:
+        raise HTTPException(
+            status_code=400, detail=f"Yara rule parsing failed: {e}"
+        )
+
+    if not rules:
+        raise HTTPException(status_code=400, detail="No rule was specified.")
+
+    if data.method == RequestQueryMethod.parse:
+        return [
+            ParseResponseSchema(
+                rule_name=rule.name,
+                rule_author=user.name,
+                is_global=rule.is_global,
+                is_private=rule.is_private,
+                is_degenerate=rule.parse().is_degenerate,
+                parsed=rule.parse().query,
+            )
+            for rule in rules
+        ]
+
+    degenerate_rules = [r.name for r in rules if r.parse().is_degenerate]
+    allow_slow = db.get_mquery_config_key("query_allow_slow") == "true"
+    if degenerate_rules and not (allow_slow and data.force_slow_queries):
+        if allow_slow:
+            # Warning: "You can force a slow query" literal is used to
+            # pattern match on the error message in the frontend.
+            help_message = "You can force a slow query if you want."
+        else:
+            help_message = "This is not allowed by this server."
+        degenerate_rule_names = ", ".join(degenerate_rules)
+        doc_url = "https://cert-polska.github.io/mquery/docs/goodyara.html"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Invalid query. Some of the rules require a full Yara scan of "
+                "every indexed file. "
+                f"{help_message} "
+                f"Slow rules: {degenerate_rule_names}. "
+                f"Read {doc_url} for more details."
+            ),
+        )
+
+    active_agents = db.get_active_agents()
+
+    for agent, agent_spec in active_agents.items():
+        missing = set(data.required_plugins).difference(
+            agent_spec.active_plugins
+        )
+        if missing:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Agent {agent} doesn't support "
+                f"required plugins: {', '.join(missing)}",
+            )
+
+    if not data.taints:
+        data.taints = []
+
+    job = db.create_search_task(
+        rules[-1].name,
+        user.name,
+        data.raw_yara,
+        data.files_limit or 0,
+        data.reference or "",
+        data.taints,
+        list(active_agents.keys()),
+    )
+    return QueryResponseSchema(query_hash=job)
+
+
+@app.get(
+    "/api/matches/{job_id}",
+    response_model=MatchesSchema,
+    tags=["stable"],
+    dependencies=[Depends(can_view_queries)],
+)
+def matches(
+    job_id: str, offset: int = Query(...), limit: int = Query(...)
+) -> MatchesSchema:
+    """
+    Returns a list of matched files, along with metadata tags and other
+    useful information. Results from this query can be used to download files
+    using the `/download` endpoint.
+    """
+    return db.get_job_matches(job_id, offset, limit)
+
+
+@app.get(
+    "/api/job/{job_id}",
+    response_model=JobSchema,
+    tags=["stable"],
+    dependencies=[Depends(can_view_queries)],
+)
+def job_info(job_id: str) -> JobSchema:
+    """
+    Returns a metadata for a single job. May be useful for monitoring
+    a job progress.
+    """
+    return db.get_job(job_id)
+
+
+@app.delete(
+    "/api/job/{job_id}",
+    response_model=StatusSchema,
+    tags=["stable"],
+    dependencies=[Depends(can_manage_queries)],
+)
+def job_cancel(
+    job_id: str, user: User = Depends(current_user)
+) -> StatusSchema:
+    """
+    Cancels the job with a provided `job_id`.
+    """
+    if "can_manage_all_queries" not in get_user_roles(user):
+        job = db.get_job(job_id)
+        if job.rule_author != user.name:
+            raise HTTPException(
+                status_code=400,
+                detail="You don't have enough permissions to cancel this job.",
+            )
+
+    db.cancel_job(job_id)
+    return StatusSchema(status="ok")
+
+
+@app.get(
+    "/api/job",
+    response_model=JobsSchema,
+    tags=["stable"],
+    dependencies=[Depends(can_list_queries)],
+)
+def job_statuses(user: User = Depends(current_user)) -> JobsSchema:
+    """
+    Returns statuses of all the jobs in the system. May take some time (> 1s)
+    when there are a lot of them.
+    """
+    jobs = [db.get_job(job) for job in db.get_job_ids()]
+    jobs = sorted(jobs, key=lambda j: j.submitted, reverse=True)
+    jobs = [j for j in jobs if j.status != "removed"]
+    if "can_list_all_queries" not in get_user_roles(user):
+        jobs = [j for j in jobs if j.rule_author == user.name]
+
+    return JobsSchema(jobs=jobs)
+
+
 @app.delete(
     "/api/query/{job_id}",
     response_model=StatusSchema,
-    dependencies=[Depends(is_user)],
+    dependencies=[Depends(can_manage_queries)],
 )
-def query_remove(job_id: str) -> StatusSchema:
-    db.remove_query(JobId(job_id))
+def query_remove(
+    job_id: str, user: User = Depends(current_user)
+) -> StatusSchema:
+    if "can_manage_all_queries" not in get_user_roles(user):
+        job = db.get_job(job_id)
+        if job.rule_author != user.name:
+            raise HTTPException(
+                status_code=400,
+                detail="You don't have enough permissions to remove this job.",
+            )
+
+    db.remove_query(job_id)
     return StatusSchema(status="ok")
 
 
@@ -521,6 +624,7 @@ def server() -> ServerSchema:
         auth_enabled=db.get_mquery_config_key("auth_enabled"),
         openid_url=db.get_mquery_config_key("openid_url"),
         openid_client_id=db.get_mquery_config_key("openid_client_id"),
+        about=app_config.mquery.about,
     )
 
 
@@ -534,6 +638,7 @@ def serve_index(path: str) -> FileResponse:
 @app.get("/query", include_in_schema=False)
 @app.get("/config", include_in_schema=False)
 @app.get("/auth", include_in_schema=False)
+@app.get("/about", include_in_schema=False)
 def serve_index_sub() -> FileResponse:
     # Static routes are always publicly accessible without authorisation.
     return FileResponse("mqueryfront/build/index.html")

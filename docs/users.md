@@ -1,7 +1,5 @@
 # User management
 
-**Warning: this is a WIP feature. Users are advised to wait for a 1.3 release before trying it out in production**
-
 By default, every mquery user enjoys full admin rights.
 This is useful for trying it out, and for locked down or
 small deployments. But for larger multi-user deplotments, it may
@@ -11,17 +9,31 @@ Optional user management in mquery is role-based, and handled by OIDC.
 
 ## Role-based permissions
 
-As of now (v1.3 pre-releases) there are two defined roles:
+There are two predefined permission sets that can be assigned to users:
 
+ - `admin`: has access to everything, including management features.
+ Can change the service configuration, manage datasets, etc.
+ Users with `admin` role can do everything `user`s can.
  - `user`: has access to the analyst features. Can
  create new search jobs, see and cancel every job, and download
- matched files.
- - `admin`: has access to the management features. Can change the
- service configuration, manage datasets, etc. Users with `admin`
- role can do everything `user`s can.
+ matched files. In current version, users can see and browse
+ all jobs in the system.
 
-**Note**: Before the release, `user` role will be improved.
-Right now, normal user can see jobs belonging to other users.
+Role names are considered stable, and will continue to work in the future.
+
+User permissions are then split into more fine-grained permissions:
+
+ - `can_view_queries`: Can view the query and matched files with a given query ID.
+ - `can_manage_queries`: Can create, stop, and delete queries.
+ - `can_list_queries`: Can list queries (for "recent jobs" tab).
+ - `can_download_files`: Can download matched file contents.
+
+It's possible to assign some of these roles directly (instead of giving the
+`user` role), but they're currently not considered stable and
+may change in some future new version.
+
+(**Note**: in the current version there is no isolation between users, and
+users can view/stop/delete each other queries. This may change in the future)
 
 ## OIDC integration
 
@@ -91,7 +103,7 @@ executing `HMSET plugin:Mquery auth_enabled ""`.
 **Step 0 (optional): enable auth in non-enforcing mode**
 
 - Go to the `config` page in mquery (http://localhost/config). Set `auth_default_roles` to `admin`
-- Set `auth_enabled` to `yes`
+- Set `auth_enabled` to `true`
 
 **Step 1: configure keycloak**
 
@@ -136,7 +148,7 @@ Get it from `http://localhost:8080/auth/admin/master/console/#/realms/myrealm/ke
 
 - Go to the `config` page in mquery. Ensure `auth_default_roles` is
 an empty string.
-- Set `auth_enabled` to `yes`
+- Set `auth_enabled` to `true`
 
 Final result:
 

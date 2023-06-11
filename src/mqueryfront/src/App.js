@@ -5,14 +5,22 @@ import QueryPage from "./query/QueryPage";
 import RecentPage from "./recent/RecentPage";
 import StatusPage from "./status/StatusPage";
 import ConfigPage from "./config/ConfigPage";
+import AboutPage from "./about/AboutPage";
 import AuthPage from "./auth/AuthPage";
 import api, { parseJWT } from "./api";
 import "./App.css";
 
+function getCurrentTokenOrNull() {
+    // This function handles missing and corrupted token in the same way.
+    try {
+        return parseJWT(localStorage.getItem("rawToken"));
+    } catch {
+        return null;
+    }
+}
+
 function App() {
     const [config, setConfig] = useState(null);
-    const rawToken = localStorage.getItem("rawToken");
-    const token = rawToken ? parseJWT(rawToken) : null;
 
     useEffect(() => {
         api.get("/server").then((response) => {
@@ -40,6 +48,8 @@ function App() {
         }
     };
 
+    const token = getCurrentTokenOrNull();
+
     return (
         <div className="App">
             <Navigation session={token} config={config} logout={logout} />
@@ -49,6 +59,11 @@ function App() {
                 <Route exact path="/recent" element={<RecentPage />} />
                 <Route exact path="/config" element={<ConfigPage />} />
                 <Route exact path="/status" element={<StatusPage />} />
+                <Route
+                    exact
+                    path="/about"
+                    element={<AboutPage config={config} />}
+                />
                 <Route
                     exact
                     path="/auth"

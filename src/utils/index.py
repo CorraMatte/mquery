@@ -13,16 +13,16 @@ def all_indexed_files(ursa: UrsaDb) -> Set[str]:
     result: Set[str] = set()
     while True:
         pop_result = ursa.pop(iterator, 10000)
-        if pop_result.iterator_empty:
-            break
         for fpath in pop_result.files:
             result.add(fpath)
+        if pop_result.iterator_empty:
+            break
     return result
 
 
 def walk_directory(dir: Path, ignores: List[str]) -> Iterator[Path]:
     """Recursively walks the current directory, while respecting .ursadbignore
-    files to selectively ignore some elements """
+    files to selectively ignore some elements"""
     if (dir / ".ursadb").exists():
         new_config = (dir / ".ursadb").read_text().strip().split("\n")
         for line in new_config:
@@ -118,7 +118,7 @@ def prepare(
     logging.info("Prepare.2: find all new files.")
 
     tmpfile = None
-    current_batch = 10 ** 20  # As good as infinity.
+    current_batch = 10**20  # As good as infinity.
     new_files = 0
     batch_id = 0
     for f in find_new_files(

@@ -44,7 +44,7 @@ class YaraParseError(Exception):
 
 
 class UrsaExpression:
-    """ Represents a single Ursadb SELECT expression body. In the future
+    """Represents a single Ursadb SELECT expression body. In the future
     this may be represented as an expression tree, for example.
 
     Examples of valid expressions are:
@@ -52,26 +52,38 @@ class UrsaExpression:
     "xyz"
     "xyz" & "www"
     ({112233} | "xxx") & "hmm"
+
+    Some UrsaExpressions are "degenerate" expressions - this means that
+    they have no useful checks and UrsaDb can't do anything with them.
+    Some examples are "", ("" | "abc") or min 2 of ("", "", "abc").
     """
 
-    def __init__(self, query: str) -> None:
+    def __init__(self, query: str, is_degenerate: bool) -> None:
         self.query = query
+        self.is_degenerate = is_degenerate
 
     @classmethod
     def literal(cls, some_string: bytes) -> "UrsaExpression":
-        return cls(f"{{{some_string.hex()}}}")
+        is_degenerate = len(some_string) < 3
+        return cls(f"{{{some_string.hex()}}}", is_degenerate)
 
     @classmethod
     def and_(cls, *args: "UrsaExpression") -> "UrsaExpression":
-        return cls(f"({' & '.join(x.query for x in args)})")
+        is_degenerate = all(x.is_degenerate for x in args)
+        return cls(f"({' & '.join(x.query for x in args)})", is_degenerate)
 
     @classmethod
     def or_(cls, *args: "UrsaExpression") -> "UrsaExpression":
-        return cls(f"({' | '.join(x.query for x in args)})")
+        is_degenerate = any(x.is_degenerate for x in args)
+        return cls(f"({' | '.join(x.query for x in args)})", is_degenerate)
 
     @classmethod
     def min_of(cls, howmany: int, *of: "UrsaExpression") -> "UrsaExpression":
-        return cls(f"(min {howmany} of ({', '.join(x.query for x in of)}))")
+        is_degenerate = sum(x.is_degenerate for x in of) >= howmany
+        return cls(
+            f"(min {howmany} of ({', '.join(x.query for x in of)}))",
+            is_degenerate,
+        )
 
 
 class YaraRuleData:
@@ -95,7 +107,7 @@ class YaraRuleData:
         result = parser.traverse(self.rule.condition)
         if result is not None:
             return result
-        return UrsaExpression("{}")
+        return UrsaExpression.literal(b"")
 
     def parse(self) -> UrsaExpression:
         if self.__parsed is None:
@@ -113,14 +125,6 @@ class YaraRuleData:
     @property
     def is_private(self) -> bool:
         return self.rule.is_private
-
-    @property
-    def author(self) -> str:
-        author_meta = self.rule.get_meta_with_name("author")
-        if author_meta:
-            return author_meta.value.pure_text
-        else:
-            return ""
 
 
 def ursify_hex(hex_str: str) -> UrsaExpression:
@@ -161,7 +165,7 @@ def ursify_nocase_bytes(raw: bytes) -> UrsaExpression:
             out.append(bytes([c]).hex())
         else:
             out.append(f"({lower.encode().hex()}|{upper.encode().hex()})")
-    return UrsaExpression(f"{{{ ' '.join(out) }}}")
+    return UrsaExpression(f"{{{ ' '.join(out) }}}", True)
 
 
 def encode_wide_bytes(raw: bytes) -> bytes:
@@ -193,7 +197,10 @@ def unescape_regex_text(raw_text: bytes) -> bytes:
 
 
 def ursify_regex_text(
-    text: bytes, is_ascii: bool, is_wide: bool, is_nocase: bool,
+    text: bytes,
+    is_ascii: bool,
+    is_wide: bool,
+    is_nocase: bool,
 ) -> Optional[UrsaExpression]:
     ursa_strings: List[UrsaExpression] = []
     for s in re.split(rb"(?<!\\)\\[wWsSdD]", text):
@@ -239,7 +246,10 @@ def flatten_regex_or_tree(unit: Any) -> Optional[List[bytes]]:
 
 
 def urisfy_regex_or_tree(
-    unit: Any, is_ascii: bool, is_wide: bool, is_nocase: bool,
+    unit: Any,
+    is_ascii: bool,
+    is_wide: bool,
+    is_nocase: bool,
 ) -> Optional[UrsaExpression]:
     or_strings = flatten_regex_or_tree(unit)
     if or_strings and all(or_strings):
@@ -479,29 +489,29 @@ class RuleParseEngine:
             return None
 
     def gt_expr(self, condition: GtExpression) -> Optional[UrsaExpression]:
-        """ From `#a > 3` we can deduce, that #a must occur at least once """
+        """From `#a > 3` we can deduce, that #a must occur at least once"""
         return self.traverse(condition.left_operand)
 
     def lt_expr(self, condition: LtExpression) -> Optional[UrsaExpression]:
-        """ From `3 < #a` we can deduce, that #a must occur at least once """
+        """From `3 < #a` we can deduce, that #a must occur at least once"""
         return self.traverse(condition.right_operand)
 
     def ge_expr(self, condition: GeExpression) -> Optional[UrsaExpression]:
-        """ From `#a >= y` we can deduce, that #a must occur at least once if y>0 """
+        """From `#a >= y` we can deduce, that #a must occur at least once if y>0"""
         if isinstance(condition.right_operand, IntLiteralExpression):
             if condition.right_operand.value > 0:
                 return self.traverse(condition.left_operand)
         return None
 
     def le_expr(self, condition: LeExpression) -> Optional[UrsaExpression]:
-        """ From `y <= #a` we can deduce, that #a must occur at least once if y>0 """
+        """From `y <= #a` we can deduce, that #a must occur at least once if y>0"""
         if isinstance(condition.left_operand, IntLiteralExpression):
             if condition.left_operand.value > 0:
                 return self.traverse(condition.right_operand)
         return None
 
     def eq_expr(self, condition: EqExpression) -> Optional[UrsaExpression]:
-        """ From `x == literal` and literal > 0 we can deduce that x must occur """
+        """From `x == literal` and literal > 0 we can deduce that x must occur"""
         if isinstance(condition.left_operand, IntLiteralExpression):
             if condition.left_operand.value > 0:
                 return self.traverse(condition.right_operand)

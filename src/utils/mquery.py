@@ -15,14 +15,13 @@ class OutputSettings:
 
 
 def query(mquery_server: str, yara_rule: str) -> str:
-    """ Queries mquery server and returns a new job ID """
+    """Queries mquery server and returns a new job ID"""
     res = requests.post(
         f"{mquery_server}/api/query",
         json={
             "method": "query",
             "raw_yara": yara_rule,
             "taint": None,
-            "priority": "normal",
             "method": "query",
         },
     ).json()
@@ -78,7 +77,7 @@ def process_job(
 
             offset += 1
 
-        FINISHED_STATES = ["cancelled", "failed", "done", "removed"]
+        FINISHED_STATES = ["cancelled", "done"]
         if not matches:
             if out["job"]["status"] in FINISHED_STATES:
                 break

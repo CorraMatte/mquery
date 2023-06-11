@@ -3,15 +3,25 @@
 ## User guide
 
 - [Installation](../INSTALL.md): Installation instruction.
+- [Configuration](./configuration.md): Additional configuration options.
+- [Components](./components.md): More detailed description of mquery components.
 - [Indexing](./indexing.md): Indexing files is one of the most important things in
     mquery. In simple cases it can be solved without leaving the web UI, but
     many things will require more advanced approach. Read this if you need to
     index a considerable number of files.
+- [How to write good yara rules](./goodyara.md): How to write YARA rules that
+    will work well in mquery.
 - [Yara support and limitations](./yara.md): Explains how mquery
     accelerates queries, what will, and what won't work.
 - [Utility scripts](./utils): Mquery ships with a few useful scripts.
     Here you can find documentation for them.
 - [For future contributors](../CONTRIBUTING.md): How to contribute.
+
+## How to...
+
+- [Install mquery natively (without docker)](how-to/install-native.md)
+- [Integrate mquery with s3](how-to/integrate-with-s3.md)
+
 
 ## Relevant [ursadb's documentation](https://cert-polska.github.io/ursadb)
 
@@ -39,5 +49,6 @@ Relevant for people who want to run mquery in production or on a a bigger scale.
 - [On-disk format](./ondiskformat.md): Read if you want to understand ursadb's on
     disk format (spoiler: many files are just JSON and can be inspected with vim).
 - [Plugin system](./plugins.md): For filtering, processing and tagging files.
+- [Database format](./redis.md): Information about the data stored in redis.
 - [User management](./users.md): Control and manage access to your mquery instance.
 - [API](./api.md): Mquery exposes a simple API that you may use for your automation.

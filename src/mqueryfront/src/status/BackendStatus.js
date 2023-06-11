@@ -32,7 +32,7 @@ class AgentStatus extends Component {
         let badge = null;
         if (!this.props.alive) {
             badge = (
-                <span className="badge badge-secondary badge-sm">offline</span>
+                <span className="badge bg-secondary badge-sm">offline</span>
             );
         }
 
@@ -71,6 +71,7 @@ class BackendStatus extends Component {
                 alive={agent.alive}
                 tasks={agent.tasks}
                 url={agent.url}
+                key={agent.name}
             />
         ));
 

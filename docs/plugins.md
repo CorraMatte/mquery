@@ -13,24 +13,24 @@ by plugins.
 
 ![](plugin-config.png)
 
-To add a new plugin to the system, you need to change PLUGINS key in
-`config.py` for bare metal setup. For example:
+To add a new plugin to the system, you need to change mquery.plugins key in
+[the config](./configuration.md). For example:
 
 ```python
-PLUGINS = ["plugins.mwdb_uploads:MalwarecageUploadsMetadata"]
+[mquery]
+plugins=plugins.mwdb_uploads:MalwarecageUploadsMetadata
 ```
 
 To load a plugin `MalwarecageUploadsMetadata` from `plugins.mwdb_uploads`
 module.
 
-To load plugins with docker-compose deployment, you can change
-`MQUERY_PLUGINS` environment variable in the container to load existing
-plugin, but to load your own plugin you need to create your own image.
+Remember that you can also use environment variable MQUERY_PLUGINS to do the
+same thing - this may be useful for docker-based deployments.
 
 ## Filter plugins
 
 Filter plugins can be used to discard files quickly (before even running
-yara rules), or to process raw paths returned from Ursadb.
+yara rules), or to process paths returned from Ursadb.
 
 The very simple example of a filter plugin is
 [RegexBlacklistPlugin](https://github.com/CERT-Polska/mquery/tree/master/src/plugins/blacklist.py)
@@ -88,6 +88,19 @@ class GzipPlugin(MetadataPlugin):
 
 The same method can be used to, for example, automatically download and extract
 files from s3 automatically.
+
+Filter plugins are ran before yara matching, and before file downloads. To avoid
+unexpected behaviour, the same set of plugins should be active in the web UI and
+in the daemon.
+
+**Warning:** if you have multiple backends either ensure that all backends and the web
+frontend use the same set of plugins, or be very careful about how they interact.
+
+For example, imagine that of the backends does gzip decompression and the other doesn't.
+Without any filter plugins installed on the frontend, download results will contain a
+mix of compressed and uncompressed files. Right now the answer to this is to write a
+plugin that does conditional decompression depending on which backend a file came from.
+It's not handled automatically.
 
 ## Metadata plugins
 

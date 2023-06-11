@@ -22,10 +22,16 @@ class PopResult:
 
     @property
     def iterator_empty(self) -> bool:
-        """ Is it safe to remove the iterator after this operation? """
+        """Is it safe to remove the iterator after this operation?"""
         if self.was_locked:
             return False
         return self.iterator_pos >= self.total_files
+
+    def __str__(self) -> str:
+        """Pretty-print iterator showing all important information"""
+        tag = "[locked] " if self.was_locked else ""
+        pos = f"{self.iterator_pos}/{self.total_files}"
+        return f"iterator {tag}with {len(self.files)} files ({pos})"
 
 
 class UrsaDb:

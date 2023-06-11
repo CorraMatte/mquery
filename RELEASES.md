@@ -1,3 +1,95 @@
+# Version 1.4
+
+### Breaking changes
+
+**[Breaking change]** mquery now users typedconfig library instead of the previous config.py file.
+
+ - if you deployed mquery using docker (configurable by environment variables)
+   then no action is required and this is backwards-compatible for you
+ - if you deployed mquery natively using the default configuration, no action is required
+ - finally, if you deploy mquery natively and changed the default config.py, you will have to create a mquery.ini
+   file with your config. The format is very simple. Example of a complete config file (there are only 4 possible
+   configuration keys supported currently. All are optional):
+
+```
+[redis]
+host=localhost
+port=6379
+
+[mquery]
+backend=tcp://localhost:9281
+plugins=
+```
+
+### New features
+
+- It's now possible to limit the number of YARA-scanned files (#339)
+- It's now possible to disallow running slow queries (#315, #312)
+- Added a configurable /about page, to describe your instance (#341)
+- Daemon now has a --scale flag, to automatically fork into mutliple processes (#298)
+- More flexible user roles (#350, #314)
+
+### Documentation
+
+- Mquery component documentation (#334)
+- YARA support documentation (#333)
+- S3 support documentation (#327)
+
+### UI Improvements
+
+- Progress bar now shows more information (#345)
+- Counter race condition fixed (#348)
+- Bootstrap update and following fixes (#346, 
+
+### Improvements
+
+- A big backend improvement - jobs are now scheduled using the RQ framework (#317)
+- Exceptions thrown during filtering with plugins are now handled correctly (#317)
+- Login is now faster - there are no unnecessary redirects (#322)
+
+### Bugfixes
+
+- /about route fixed (#343)
+- Indexing script won't skip the last few files anymore (#328)
+- Actually raise errors from the API (#311)
+- Fix multi-agent job completion (#282)
+
+### Others
+
+- Dockerignore and Gitignore updated (#344)
+- Some obsolete features removed from the codebase (#330, #313, #306)
+
+
+# Version 1.3
+
+### New features
+
+- User accounts with OIDC (#250, #251, #252, #253, #255, #258, #266, #265, #274, #276, #278, #280)
+
+### UI Improvements
+
+- Multiselect for sample tags [(#164)](https://github.com/CERT-Polska/mquery/pull/164)
+- Ctrl+enter now submits a job in the query window [(#217)](https://github.com/CERT-Polska/mquery/pull/217)
+- Added a button to copy all matched hashes [(#239)](https://github.com/CERT-Polska/mquery/pull/239)
+
+### Improvements
+
+- A bit better support for Yara rules:
+    - Improve parsing of string count expressions [(#269)](https://github.com/CERT-Polska/mquery/pull/269)
+    - Discard partial "or" expressions [(#190)](https://github.com/CERT-Polska/mquery/pull/190)
+    - Fixed the regex parsing [(#229)](https://github.com/CERT-Polska/mquery/pull/229)
+
+### Bugfixes
+
+- NPM made a breaking change that broke our builds - fixed with [#272](https://github.com/CERT-Polska/mquery/pull/66)
+- Add a missing /config route [#209](https://github.com/CERT-Polska/mquery/pull/209)
+
+### Others
+
+- Remove ursadb repository as a submodule [(#277)](https://github.com/CERT-Polska/mquery/pull/277)
+- Automatically build and push docker images on merge [(#262)](https://github.com/CERT-Polska/mquery/pull/262)
+- Various refactoring changes, like [(#199)](https://github.com/CERT-Polska/mquery/pull/199) or #245
+
 # Version 1.2
 
 ![](./docs/interface-v1.2.gif)

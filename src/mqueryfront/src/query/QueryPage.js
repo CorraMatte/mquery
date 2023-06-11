@@ -15,6 +15,7 @@ const INITIAL_STATE = {
     selectedTaints: [],
     job: null,
     activePage: 1,
+    forceSlowQueries: false,
 };
 
 const PAGE_SIZE = 20;
@@ -76,12 +77,12 @@ class QueryPageInner extends Component {
         }
     }
 
-    handleSubmitQuery(priority) {
-        this.submitJob("query", priority);
+    handleSubmitQuery() {
+        this.submitJob("query");
     }
 
     handleParseQuery() {
-        this.submitJob("parse", null);
+        this.submitJob("parse");
     }
 
     handleEditQuery() {
@@ -94,6 +95,9 @@ class QueryPageInner extends Component {
     };
 
     handleYaraUpdate(value) {
+        this.setState({
+            forceSlowQueries: false,
+        });
         this.setState({ rawYara: value });
     }
 
@@ -157,7 +161,7 @@ class QueryPageInner extends Component {
         return response ? response.data : {};
     }
 
-    async submitJob(method, priority) {
+    async submitJob(method) {
         try {
             const taints =
                 this.state.selectedTaints.map((obj) => obj.value) || [];
@@ -165,8 +169,8 @@ class QueryPageInner extends Component {
             const response = await api.post("/query", {
                 raw_yara: this.state.rawYara,
                 method: method,
-                priority: priority,
                 taints: taints,
+                force_slow_queries: this.state.forceSlowQueries,
             });
             if (method === "query") {
                 this.props.navigate(`/query/${response.data.query_hash}`);
@@ -183,6 +187,11 @@ class QueryPageInner extends Component {
                     : error.toString(),
                 queryPlan: null,
             });
+            if (this.state.queryError.match(/You can force a slow query/)) {
+                this.setState({
+                    forceSlowQueries: true,
+                });
+            }
         }
     }
 
@@ -249,6 +258,7 @@ class QueryPageInner extends Component {
                     onYaraUpdate={this.handleYaraUpdate}
                     parsedError={this.parsedError}
                     selectedTaints={this.state.selectedTaints}
+                    forceSlowQueries={this.state.forceSlowQueries}
                 />
             </ErrorBoundary>
         );
